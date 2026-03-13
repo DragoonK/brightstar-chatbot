@@ -78,6 +78,19 @@ Stage 3 — Pay tuition fees and attend parent orientation.
 Stage 4 — Academic Preparation Course (APC): one-week course to prepare student for Brightstar's academic routine and values.
 Stage 5 — Start school!
 
+LEAD CAPTURE INSTRUCTIONS — VERY IMPORTANT:
+When you have successfully collected ALL THREE of the following from a parent:
+1. Parent's name
+2. Child's age OR grade level
+3. WhatsApp number
+
+You MUST add this exact tag at the very end of your response, on its own line, with no extra spaces:
+[LEAD:name=PARENT_NAME,grade=CHILD_AGE_OR_GRADE,whatsapp=WHATSAPP_NUMBER]
+
+Example: [LEAD:name=Sokha,grade=Year 2,whatsapp=012345678]
+
+Only add this tag once, when you have all three pieces of info. Never add it if any piece is missing.
+
 CONVERSATION RULES:
 - Start with a warm greeting and ask the parent's name and which grade level they are enquiring about
 - Always proactively mention the 2-Week Free Trial for interested parents
@@ -87,6 +100,32 @@ CONVERSATION RULES:
 - Be like a warm, knowledgeable school receptionist, not a salesperson
 
 Always end conversations with: "Thank you for reaching out to Brightstar! Our admissions team is here to support you every step of the way. You can also call us on 012 408 789 or visit brightstar.edu.kh to learn more."`;
+
+const MAKE_WEBHOOK_URL = "https://hook.eu1.make.com/83oxsmbml8kacg3qvplkkb8xmvjsr31b";
+
+async function fireLeadWebhook(leadData) {
+  try {
+    await fetch(MAKE_WEBHOOK_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(leadData),
+    });
+  } catch (err) {
+    console.error("Webhook error:", err);
+  }
+}
+
+function extractLead(text) {
+  const match = text.match(/\[LEAD:name=([^,]+),grade=([^,]+),whatsapp=([^\]]+)\]/);
+  if (!match) return null;
+  return {
+    parentName: match[1].trim(),
+    grade: match[2].trim(),
+    whatsapp: match[3].trim(),
+    date: new Date().toISOString(),
+  };
+}
+
 export async function POST(request) {
   try {
     const { messages } = await request.json();
@@ -123,12 +162,23 @@ export async function POST(request) {
 
     const data = await response.json();
 
-    const text = data.content
+    const rawText = data.content
       ?.map((block) => (block.type === "text" ? block.text : ""))
       .filter(Boolean)
       .join("\n") || "Sorry, I had trouble responding.";
 
-    return Response.json({ reply: text });
+    // Check for lead tag and fire webhook
+    const lead = extractLead(rawText);
+    if (lead) {
+      // Get first user message as context
+      const firstMessage = messages.find((m) => m.role === "user")?.content || "";
+      fireLeadWebhook({ ...lead, firstMessage });
+    }
+
+    // Strip the lead tag from the reply before sending to frontend
+    const cleanText = rawText.replace(/\[LEAD:[^\]]+\]/g, "").trim();
+
+    return Response.json({ reply: cleanText });
   } catch (err) {
     console.error("Chat API error:", err);
     return Response.json({ error: "Internal server error" }, { status: 500 });
