@@ -104,7 +104,7 @@ CONVERSATION RULES:
 - Be like a warm, knowledgeable school receptionist, not a salesperson
 - Always end with: "Thank you for reaching out to Brightstar! You can also call us on 012 408 789 or visit brightstar.edu.kh"`;
 
-const APPS_SCRIPT_URL = "https://script.google.com/a/macros/eastworld.com.au/s/AKfycbzjc0urbnwyvRmd8IxrGqDXNsBtg8OKTMU-hvQK_4T6V28xXA-mRQ7aSoxsBx4VhH-S/exec";
+const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzjc0urbnwyvRmd8IxrGqDXNsBtg8OKTMU-hvQK_4T6V28xXA-mRQ7aSoxsBx4VhH-S/exec";
 
 async function fireLeadWebhook(leadData) {
   try {
