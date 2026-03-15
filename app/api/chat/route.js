@@ -104,20 +104,47 @@ CONVERSATION RULES:
 - Be like a warm, knowledgeable school receptionist, not a salesperson
 - Always end with: "Thank you for reaching out to Brightstar! You can also call us on 012 408 789 or visit brightstar.edu.kh"`;
 
-const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzjc0urbnwyvRmd8IxrGqDXNsBtg8OKTMU-hvQK_4T6V28xXA-mRQ7aSoxsBx4VhH-S/exec";
+const APPS_SCRIPT_URL = "https://script.google.com/macros/s/https://script.google.com/macros/s/AKfycbwhI-NMZ2iF0O2pbUkaHYIdv7Q4tFlmbo89SPJBZgStytatDy-G4f6ukTe-71If9w9R/execAKfycbzjc0urbnwyvRmd8IxrGqDXNsBtg8OKTMU-hvQK_4T6V28xXA-mRQ7aSoxsBx4VhH-S/exec";
 
+/**
+ * Send captured lead data to Google Sheets via Apps Script
+ * 
+ * FIX #1: Content-Type MUST be "text/plain" — NOT "application/json"
+ *   → "application/json" triggers a CORS preflight OPTIONS request
+ *   → Google Apps Script CANNOT handle OPTIONS requests
+ *   → The POST silently fails and no data reaches your sheet
+ * 
+ * FIX #2: Added redirect: "follow" 
+ *   → Apps Script returns a 302 redirect on POST
+ *   → Without this, fetch may not follow the redirect automatically
+ *   → Result: you get an HTML page instead of your JSON response
+ */
 async function fireLeadWebhook(leadData) {
   try {
-    await fetch(APPS_SCRIPT_URL, {
+    console.log("📋 Sending lead to Google Sheets:", JSON.stringify(leadData));
+
+    const response = await fetch(APPS_SCRIPT_URL, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "text/plain" },  // ← THE FIX: was "application/json"
       body: JSON.stringify(leadData),
+      redirect: "follow",                          // ← FIX #2: follow Google's redirect
     });
+
+    // Log the response for debugging
+    const responseText = await response.text();
+    console.log("📋 Google Sheets response:", response.status, responseText);
+
+    return { success: true, response: responseText };
   } catch (err) {
-    console.error("Webhook error:", err);
+    console.error("❌ Lead webhook failed:", err.message);
+    return { success: false, error: err.message };
   }
 }
 
+/**
+ * Extract lead data from Claude's response
+ * Looks for: [LEAD:name=X,grade=Y,phone=Z]
+ */
 function extractLead(text) {
   const match = text.match(/\[LEAD:name=([^,]+),grade=([^,]+),phone=([^\]]+)\]/);
   if (!match) return null;
@@ -126,6 +153,7 @@ function extractLead(text) {
     grade: match[2].trim(),
     phoneNumber: match[3].trim(),
     date: new Date().toISOString(),
+    source: "Website Chatbot",
   };
 }
 
@@ -175,7 +203,16 @@ export async function POST(request) {
     const lead = extractLead(rawText);
     if (lead) {
       const firstMessage = messages.find((m) => m.role === "user")?.content || "";
-      fireLeadWebhook({ ...lead, firstMessage });
+      console.log("🎯 Lead captured!", lead);
+
+      // Fire webhook — don't block the chat response, but log result
+      fireLeadWebhook({ ...lead, firstMessage }).then((result) => {
+        if (result.success) {
+          console.log("✅ Lead saved to Google Sheets");
+        } else {
+          console.error("❌ Lead save failed:", result.error);
+        }
+      });
     }
 
     // Strip lead tag before sending reply to frontend
