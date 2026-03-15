@@ -104,39 +104,28 @@ CONVERSATION RULES:
 - Be like a warm, knowledgeable school receptionist, not a salesperson
 - Always end with: "Thank you for reaching out to Brightstar! You can also call us on 012 408 789 or visit brightstar.edu.kh"`;
 
-const APPS_SCRIPT_URL = "https://script.google.com/macros/s/https://script.google.com/macros/s/AKfycbwhI-NMZ2iF0O2pbUkaHYIdv7Q4tFlmbo89SPJBZgStytatDy-G4f6ukTe-71If9w9R/execAKfycbzjc0urbnwyvRmd8IxrGqDXNsBtg8OKTMU-hvQK_4T6V28xXA-mRQ7aSoxsBx4VhH-S/exec";
+const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzjc0urbnwyvRmd8IxrGqDXNsBtg8OKTMU-hvQK_4T6V28xXA-mRQ7aSoxsBx4VhH-S/exec";
 
 /**
  * Send captured lead data to Google Sheets via Apps Script
- * 
- * FIX #1: Content-Type MUST be "text/plain" — NOT "application/json"
- *   → "application/json" triggers a CORS preflight OPTIONS request
- *   → Google Apps Script CANNOT handle OPTIONS requests
- *   → The POST silently fails and no data reaches your sheet
- * 
- * FIX #2: Added redirect: "follow" 
- *   → Apps Script returns a 302 redirect on POST
- *   → Without this, fetch may not follow the redirect automatically
- *   → Result: you get an HTML page instead of your JSON response
  */
 async function fireLeadWebhook(leadData) {
   try {
-    console.log("📋 Sending lead to Google Sheets:", JSON.stringify(leadData));
+    console.log("[LEAD CAPTURE] Sending to Google Sheets:", JSON.stringify(leadData));
 
     const response = await fetch(APPS_SCRIPT_URL, {
       method: "POST",
-      headers: { "Content-Type": "text/plain" },  // ← THE FIX: was "application/json"
+      headers: { "Content-Type": "text/plain" },
       body: JSON.stringify(leadData),
-      redirect: "follow",                          // ← FIX #2: follow Google's redirect
+      redirect: "follow",
     });
 
-    // Log the response for debugging
     const responseText = await response.text();
-    console.log("📋 Google Sheets response:", response.status, responseText);
+    console.log("[LEAD CAPTURE] Google Sheets response:", response.status, responseText);
 
     return { success: true, response: responseText };
   } catch (err) {
-    console.error("❌ Lead webhook failed:", err.message);
+    console.error("[LEAD CAPTURE] Webhook failed:", err.message);
     return { success: false, error: err.message };
   }
 }
@@ -199,20 +188,31 @@ export async function POST(request) {
         .filter(Boolean)
         .join("\n") || "Sorry, I had trouble responding.";
 
+    // DEBUG: Log the tail of Claude's response to verify [LEAD:] tag
+    console.log("[DEBUG] Raw AI response (last 300 chars):", rawText.slice(-300));
+
     // Extract lead and fire webhook if all 3 fields present
     const lead = extractLead(rawText);
-    if (lead) {
-      const firstMessage = messages.find((m) => m.role === "user")?.content || "";
-      console.log("🎯 Lead captured!", lead);
+    console.log("[DEBUG] Lead extraction result:", lead ? JSON.stringify(lead) : "NO LEAD TAG FOUND");
 
-      // Fire webhook — don't block the chat response, but log result
-      fireLeadWebhook({ ...lead, firstMessage }).then((result) => {
-        if (result.success) {
-          console.log("✅ Lead saved to Google Sheets");
-        } else {
-          console.error("❌ Lead save failed:", result.error);
-        }
-      });
+    if (lead) {
+      console.log("[LEAD CAPTURE] Lead detected:", JSON.stringify(lead));
+
+      const firstMessage = messages.find((m) => m.role === "user")?.content || "";
+
+      // Send to Google Sheets — field names match Apps Script doPost() exactly:
+      // data.parentName, data.grade, data.phoneNumber, data.firstMessage, data.source
+      try {
+        await fireLeadWebhook({
+          parentName: lead.parentName,
+          grade: lead.grade,
+          phoneNumber: lead.phoneNumber,
+          firstMessage: firstMessage.slice(0, 200),
+          source: "Website Chatbot",
+        });
+      } catch (webhookErr) {
+        console.error("[LEAD CAPTURE] Webhook threw:", webhookErr.message);
+      }
     }
 
     // Strip lead tag before sending reply to frontend
