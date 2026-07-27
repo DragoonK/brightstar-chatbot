@@ -11,11 +11,24 @@ const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const HISTORY_TTL = 60 * 60 * 24 * 7;
 const MAX_TURNS = 20;
 
-// Matches your real lead tag format: [LEAD:name=X,grade=Y,phone=Z]
-function grab(tag, key) {
-  const m = tag.match(new RegExp(`${key}=([^,\\]]+)`));
-  return m ? m[1].trim() : '';
-}
+const CAPTURE_LEAD_TOOL = {
+  name: 'capture_lead',
+  description:
+    "Call this as soon as you know the parent's name AND phone number. " +
+    "Child's age or grade is optional — include it if you have it, omit it if not; " +
+    "never wait on it. Call this even if you are also answering another question " +
+    "or asking about campus in the same turn — capturing the lead and continuing " +
+    "the conversation are not in conflict.",
+  input_schema: {
+    type: 'object',
+    properties: {
+      name: { type: 'string', description: "The parent's name" },
+      phone: { type: 'string', description: "The parent's phone or contact number" },
+      grade: { type: 'string', description: "The child's age or grade level, if known" },
+    },
+    required: ['name', 'phone'],
+  },
+};
 
 export async function POST(req, { params }) {
   const sid = params.schoolId;
@@ -59,11 +72,13 @@ export async function POST(req, { params }) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
+        chatId: String(chatId), // lets this row be found and updated later
         parentName: msg.from.username ? `@${msg.from.username}` : (msg.from.first_name || 'Unknown'),
         grade: '',
         phoneNumber: '',
         firstMessage: '/start',
-        source: `telegram_${campaign}_CHAT_OPENED`,
+        source: `telegram_${campaign}`,
+        status: 'CHAT_OPENED',
       }),
     }).catch(() => {});
 
@@ -76,34 +91,58 @@ export async function POST(req, { params }) {
   const response = await anthropic.messages.create({
     model: 'claude-sonnet-4-6',
     max_tokens: 1024,
-    system: school.systemPrompt,
+    // Override shared prompt LEAD-tag instructions — website chat still uses those tags
+    system:
+      school.systemPrompt +
+      '\n\nLEAD CAPTURE — TELEGRAM OVERRIDE (replaces any [LEAD:...] tag instructions above):\n' +
+      'Do NOT append [LEAD:...] tags. Instead, call the capture_lead tool as soon as you know ' +
+      "the parent's name AND phone number. Child's age or grade is optional — include it if you " +
+      'have it, omit it if not; never wait on it. Call the tool even if you are also answering ' +
+      'another question or asking about campus in the same turn.',
     messages: [...history, { role: 'user', content: userText }],
+    tools: [CAPTURE_LEAD_TOOL],
   });
 
-  let reply = response.content[0].text;
+  // Text blocks are what the parent actually sees on Telegram
+  let reply = response.content
+    .filter((block) => block.type === 'text')
+    .map((block) => block.text)
+    .join('\n')
+    .trim();
 
-  // Matches [LEAD:name=X,grade=Y,phone=Z]
-  const leadMatch = reply.match(/\[LEAD:[^\]]+\]/);
-  if (leadMatch) {
-    reply = reply.replace(leadMatch[0], '').trim();
-    const dedupKey = `tg:${sid}:lead:${chatId}`;
-    if (!(await redis.get(dedupKey))) {
-      const storedCampaign = (await redis.get(`tg:${sid}:campaign:${chatId}`)) || campaign;
-      await fetch(school.appsScriptUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          parentName: grab(leadMatch[0], 'name'),
-          grade: grab(leadMatch[0], 'grade'),
-          phoneNumber: grab(leadMatch[0], 'phone'),
-          firstMessage: history[0]?.content || userText,
-          source: `telegram_${storedCampaign}`,
-        }),
-      });
-      await redis.set(dedupKey, '1', { ex: HISTORY_TTL });
-    }
+  if (!reply) {
+    // Model called the tool but produced no visible text — shouldn't
+    // normally happen, but never leave the parent with a blank message
+    reply = "Thanks! Let me get that sorted for you — I'll have our team follow up shortly.";
   }
 
+  // Tool call is separate from the reply text entirely — no more
+  // competing for space inside one string, no more regex
+  const leadCall = response.content.find(
+    (block) => block.type === 'tool_use' && block.name === 'capture_lead'
+  );
+
+  if (leadCall) {
+    const { name, phone, grade } = leadCall.input;
+    const storedCampaign =
+      (await redis.get(`tg:${sid}:campaign:${chatId}`)) || campaign;
+
+    await fetch(school.appsScriptUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chatId: String(chatId),
+        parentName: name,
+        grade: grade || '',
+        phoneNumber: phone,
+        firstMessage: history[0]?.content || userText,
+        source: `telegram_${storedCampaign}`,
+        status: 'LEAD_CAPTURED',
+      }),
+    }).catch(() => {});
+  }
+
+  // Persist text-only — never store raw tool_use blocks without a matching tool_result
   const newHistory = [...history, { role: 'user', content: userText }, { role: 'assistant', content: reply }].slice(-MAX_TURNS);
   await redis.set(historyKey, newHistory, { ex: HISTORY_TTL });
 
